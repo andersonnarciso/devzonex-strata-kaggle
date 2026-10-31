@@ -20,7 +20,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 WORKING = Path("/kaggle/working")
-INPUT_ROOT = Path("/kaggle/input/datasets")
+# Kaggle mounts an attached dataset either as /kaggle/input/<slug> or, in namespaced
+# notebooks, as /kaggle/input/datasets/<owner>/<slug>. Both layouts are searched.
+INPUT_ROOTS = (Path("/kaggle/input/datasets"), Path("/kaggle/input"))
 STRATA_ROOT = Path("/root/.local/share/strata")
 STRATA_BIN = Path("/root/.local/bin/strata")
 CLOUDFLARED_BIN = Path("/root/.local/bin/cloudflared")
@@ -258,19 +260,24 @@ def default_gpu_list() -> str:
 
 
 def find_attached_dataset(owner: str, slug: str, marker: str | None = None) -> Path | None:
-    exact = INPUT_ROOT / owner / slug
-    if exact.is_dir() and (marker is None or (exact / marker).is_file()):
-        return exact
-    if not INPUT_ROOT.exists():
-        return None
+    """Find an attached Kaggle dataset in any of the mount layouts Kaggle uses.
+
+    An attached dataset shows up as /kaggle/input/<slug> or, in namespaced
+    notebooks, as /kaggle/input/datasets/<owner>/<slug>. A restore that only
+    looked at one of them silently skipped the cache and re-downloaded the
+    model, so every layout is checked here.
+    """
     marker_name = marker or "dataset-metadata.json"
-    for candidate in INPUT_ROOT.rglob(marker_name):
-        parent = candidate.parent
-        if parent.name == slug and (parent.parent.name == owner or owner in parent.parts):
-            return parent
+    for root in INPUT_ROOTS:
+        if not root.exists():
+            continue
+        for candidate in (root / owner / slug, root / slug):
+            if candidate.is_dir() and (candidate / marker_name).is_file():
+                return candidate
+        for candidate in root.rglob(marker_name):
+            if candidate.parent.name == slug:
+                return candidate.parent
     return None
-
-
 def safe_extract_runtime(archive: Path, destination: Path) -> None:
     """Safely extract runtime paths, normalizing internal absolute symlinks.
 
@@ -711,11 +718,13 @@ def _model_source_args(data_dir: Path, family: str, variant: str) -> list[str]:
 
 
 def run_plan(family: str, variant: str, context: str, vision: str,
-             gpu_list: str, data_dir: Path) -> str:
+             gpu_list: str, data_dir: Path, api_key_env: str | None = None) -> str:
     cmd = ["strata", "launch", "--plan", "--family", family, "--model", variant,
            *_model_source_args(data_dir, family, variant), "--context", context, "--vision", vision,
            "--mtp", "off", "--tune", "skip", "--access", "cloudflare",
            "--port", "8080", "--gpu", gpu_list]
+    if api_key_env:
+        cmd += ["--api-key-env", api_key_env]
     result = run_streaming(cmd, timeout=300, check=False,
                            heartbeat_interval=15, heartbeat_label="Strata launch plan",
                            progress_paths=[data_dir, STRATA_ROOT / "components"])
@@ -723,24 +732,24 @@ def run_plan(family: str, variant: str, context: str, vision: str,
     if result.returncode:
         raise RuntimeError("Strata plan failed. Choose a supported family/model variant.")
     return output
-
-
 def launch_strata(family: str, variant: str, context: str, vision: str,
-                  gpu_list: str, data_dir: Path) -> str:
+                  gpu_list: str, data_dir: Path, api_key_env: str | None = None) -> str:
     cmd = ["strata", "launch", "--family", family, "--model", variant,
            *_model_source_args(data_dir, family, variant), "--context", context, "--vision", vision,
            "--mtp", "off", "--tune", "skip", "--access", "cloudflare",
            "--port", "8080", "--gpu", gpu_list, "--yes", "--no-tui"]
+    if api_key_env:
+        cmd += ["--api-key-env", api_key_env]
     log("Launching Strata. First-time model/engine downloads may take a while.")
-    result = run_streaming(cmd, timeout=3600, check=False,
+    # ponytail: the first run downloads ~60 GiB inside this call, so the timeout
+    # has to outlast a slow link, not a 60-minute one.
+    result = run_streaming(cmd, timeout=14400, check=False,
                            heartbeat_interval=20, heartbeat_label="Strata model/engine launch",
                            progress_paths=[data_dir, STRATA_ROOT / "components"])
     output = result.stdout or ""
     if result.returncode:
         raise RuntimeError("Strata launch failed. Inspect the redacted output above.")
     return output
-
-
 def install_cloudflared_if_missing() -> None:
     os.environ["PATH"] = "/root/.local/bin:" + os.environ.get("PATH", "")
     if shutil.which("cloudflared"):
@@ -765,15 +774,17 @@ def install_cloudflared_if_missing() -> None:
 
 
 def _read_key() -> str:
+    # A key handed over through STRATA_API_KEY never touches the notebook output.
+    from_env = os.environ.get("STRATA_API_KEY", "").strip()
+    if from_env:
+        return from_env
     result = subprocess.run(["strata", "launch", "--show-key"], text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             timeout=60, check=True)
-    match = re.search(r"sk-strata-[A-Za-z0-9._~-]+", result.stdout or "")
+    match = re.search(r"sk-strata-[A-Za-z0-9._~-]+|sk-[A-Za-z0-9._~-]{16,}", result.stdout or "")
     if not match:
         raise RuntimeError("Could not safely identify the Strata API key.")
     return match.group(0)
-
-
 def wait_health(timeout_seconds: int = 900) -> dict[str, Any]:
     import requests
     deadline, last = time.time() + timeout_seconds, "no response"
@@ -1048,16 +1059,27 @@ def upload_runtime_cache(username: str, slug: str, env: dict[str, str], force: b
 
 
 def opencode_config_snippet(public_url: str, model_id: str,
-                            provider_package: str = "@opencode/ai/providers/openai-compatible") -> str:
+                            provider_package: str = "@ai-sdk/openai-compatible") -> str:
+    """OpenCode 1.x provider block for the Strata tunnel.
+
+    OpenCode 1.x reads "provider" with "npm" and "options"; the V2 shape
+    ("providers" with "package" and "settings") is rejected by 1.x.
+    """
     provider = {
-        "name": "Strata Kaggle", "package": provider_package,
-        "settings": {"baseURL": public_url.rstrip("/") + "/v1",
-                     "apiKey": "{file:~/.config/opencode/strata-key.txt}",
-                     "encoding": "none", "timeout": 600000, "headerTimeout": 120000,
-                     "chunkTimeout": 300000},
-        "models": {model_id: {"name": model_id, "modelID": model_id,
-                              "reasoningEffort": "none",
-                              "capabilities": {"tools": True, "input": ["text"], "output": ["text"]},
-                              "limit": {"context": 32768, "output": 8192}}},
+        "name": "Strata (Kaggle)",
+        "npm": provider_package,
+        "options": {
+            "baseURL": public_url.rstrip("/") + "/v1",
+            "apiKey": "{file:~/.config/opencode/strata-key.txt}",
+            "timeout": 600000,
+            "headerTimeout": 120000,
+            "chunkTimeout": 300000,
+        },
+        "models": {
+            model_id: {
+                "name": model_id,
+                "limit": {"context": 32768, "output": 8192},
+            },
+        },
     }
     return json.dumps({"strata": provider}, indent=2)

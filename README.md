@@ -6,6 +6,30 @@
 ![Status](https://img.shields.io/badge/status-experimental-orange)
 [![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/iAmAjayTeli/devzonex-strata-kaggle/blob/main/notebooks/Strata_Kaggle_Launcher.ipynb)
 
+> **This is a fork with fixes for running this on Kaggle.** The upstream project is
+> [iAmAjayTeli/devzonex-strata-kaggle](https://github.com/iAmAjayTeli/devzonex-strata-kaggle);
+> this fork keeps the same workflow and changes only what breaks a Kaggle session.
+>
+> Import the notebook from the raw URL (the "Open in Kaggle" badge above points at a
+> GitHub `blob` page, which Kaggle's importer does not resolve):
+>
+> ```text
+> https://raw.githubusercontent.com/andersonnarciso/devzonex-strata-kaggle/main/notebooks/Strata_Kaggle_Launcher.ipynb
+> ```
+>
+> What this fork changes:
+>
+> | Change | Why |
+> |---|---|
+> | `MODEL_RESTORE_MODE` defaults to `symlink` | The model cache is about 80 GiB. Copying it into `/root/strata-local` needs that space twice on a Kaggle session, which the writable layer does not have. |
+> | Attached datasets are searched in both mount layouts | Kaggle mounts as `/kaggle/input/<slug>` or `/kaggle/input/datasets/<owner>/<slug>`. The upstream lookup only covered one, so a restore could be skipped in silence and the 58.5 GB model re-downloaded. |
+> | New preflight cell | Prints free disk on every relevant path, plus the GPU name, driver and VRAM. The Strata Linux x86_64 engine needs driver 575.51 (CUDA 12) or 580.65 (CUDA 13). |
+> | Optional `STRATA_API_KEY` Secret | When set, Strata starts with `--api-key-env`, so the API key never appears in any cell output. |
+> | Launch timeout raised to 4 hours | The first run downloads about 60 GiB inside the launch call; one hour was not enough on a slow link. |
+> | OpenCode snippet uses the OpenCode 1.x shape | 1.x reads `provider` with `npm` and `options`. The V2 shape (`providers`, `package`, `settings`) is rejected by 1.x. |
+>
+> See [docs/kaggle-setup.md](docs/kaggle-setup.md) for the step-by-step checklist.
+
 **Run a Strata-supported model on a Kaggle GPU, cache the model and Strata runtime in your own private Kaggle Datasets, and connect OpenCode Desktop through a temporary authenticated HTTPS tunnel.**
 
 This project turns our Strata + Qwen3.8-Flash-Next Gyro-S setup into a guided notebook. The default example is `gyro / gyro-s`; other choices must be supported by the installed Strata release.

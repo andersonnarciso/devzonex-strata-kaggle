@@ -182,7 +182,7 @@ class StrataKaggleTests(unittest.TestCase):
                 __import__("json").dumps(manifest), encoding="utf-8"
             )
             output = io.StringIO()
-            with patch("scripts.strata_kaggle.INPUT_ROOT", input_root):
+            with patch("scripts.strata_kaggle.INPUT_ROOTS", (input_root,)):
                 with contextlib.redirect_stdout(output):
                     restored = restore_model_cache(
                         "test-owner",
@@ -218,7 +218,7 @@ class StrataKaggleTests(unittest.TestCase):
             }
             (dataset / "manifest.json").write_text(__import__("json").dumps(manifest), encoding="utf-8")
             target_root = root / "local-model"
-            with patch("scripts.strata_kaggle.INPUT_ROOT", input_root):
+            with patch("scripts.strata_kaggle.INPUT_ROOTS", (input_root,)):
                 restored = restore_model_cache(
                     "test-owner", "strata-model-gyro-gyro-s", target_root,
                     family="gyro", variant="gyro-s", restore_mode="symlink",
@@ -229,17 +229,43 @@ class StrataKaggleTests(unittest.TestCase):
             self.assertEqual(linked.read_bytes(), payload)
             self.assertEqual(linked.resolve(), flattened.resolve())
 
-    def test_open_code_snippet_has_provider_wrapper_and_no_key(self):
+    def test_open_code_snippet_is_opencode_v1_shape(self):
         value = opencode_config_snippet("https://sample.trycloudflare.com", "qwen3.8-flash-next-gyro-gyro-s")
         import json
         parsed = json.loads(value)
         self.assertIn("strata", parsed)
-        self.assertEqual(parsed["strata"]["settings"]["apiKey"], "{file:~/.config/opencode/strata-key.txt}")
-        self.assertEqual(
-            parsed["strata"]["models"]["qwen3.8-flash-next-gyro-gyro-s"]["reasoningEffort"],
-            "none",
-        )
+        provider = parsed["strata"]
+        # OpenCode 1.x reads "npm" + "options"; the V2 "package"/"settings" shape is rejected.
+        self.assertEqual(provider["npm"], "@ai-sdk/openai-compatible")
+        self.assertEqual(provider["options"]["apiKey"], "{file:~/.config/opencode/strata-key.txt}")
+        self.assertEqual(provider["options"]["baseURL"], "https://sample.trycloudflare.com/v1")
+        self.assertNotIn("package", provider)
+        self.assertNotIn("settings", provider)
+        model = provider["models"]["qwen3.8-flash-next-gyro-gyro-s"]
+        self.assertEqual(model["limit"], {"context": 32768, "output": 8192})
         self.assertNotIn("sk-strata-", value)
+
+    def test_find_attached_dataset_finds_flat_input_layout(self):
+        import scripts.strata_kaggle as sk
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "datasets" / "owner" / "slug").mkdir(parents=True)
+            (root / "datasets" / "owner" / "slug" / "manifest.json").write_text("{}")
+            # Kaggle also mounts as /kaggle/input/<slug> with no owner folder.
+            (root / "flat").mkdir()
+            (root / "flat" / "manifest.json").write_text("{}")
+            with patch.object(sk, "INPUT_ROOTS", (root / "datasets", root)):
+                found = sk.find_attached_dataset("owner", "flat", "manifest.json")
+                self.assertIsNotNone(found)
+                self.assertEqual(found.name, "flat")
+                # The namespaced layout still resolves.
+                nested = sk.find_attached_dataset("owner", "slug", "manifest.json")
+                self.assertEqual(nested, root / "datasets" / "owner" / "slug")
+
+    def test_read_key_prefers_environment(self):
+        import scripts.strata_kaggle as sk
+        with patch.dict(os.environ, {"STRATA_API_KEY": "sk-strata-from-secret"}):
+            self.assertEqual(sk._read_key(), "sk-strata-from-secret")
 
 
 if __name__ == "__main__":

@@ -42,3 +42,19 @@ Kaggle controls GPU selection, Internet access, Secrets, dataset visibility, and
 After launch and successful API verification, run the optional supervision cell. It checks the model health and tunnel/auth boundary for up to six hours. This does not override Kaggle's execution limits, quotas, inactivity behavior, or service failures.
 
 In `copy` mode, restoration prints live progress (GiB, percentage, completed files, current copy count, throughput, and elapsed time) rather than waiting for several complete files before displaying an update.
+
+## Fork additions
+
+* Run the preflight cell before anything else. It prints free disk per path and the
+  GPU driver. The Strata Linux x86_64 engine package needs NVIDIA driver 575.51
+  (CUDA 12 build) or 580.65 (CUDA 13 build); older Kaggle images cannot install an
+  engine at all.
+* Add a second Secret named `STRATA_API_KEY` if you want a fixed API key. The
+  notebook passes it to Strata with `--api-key-env`, so it never reaches a cell
+  output. Without it, Strata generates its own key.
+* An attached dataset is found at `/kaggle/input/<slug>` or at
+  `/kaggle/input/datasets/<owner>/<slug>`. Both are searched, and the restore cell
+  prints `Model cache restored: True` so a miss is visible.
+* The OpenCode provider block matches OpenCode 1.x (`provider`, `npm`, `options`).
+  On your own machine save the key once at `~/.config/opencode/strata-key.txt` with
+  mode 600; the block references it with `{file:~/.config/opencode/strata-key.txt}`.
