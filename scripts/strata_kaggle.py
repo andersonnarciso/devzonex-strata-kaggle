@@ -57,18 +57,25 @@ def run_command(command: list[str], *, check: bool = True, timeout: int | None =
 
 
 def kaggle_env(username: str, secret_name: str = "KAGGLE_API_TOKEN") -> dict[str, str]:
-    if not username or username.lower().startswith("your-"):
-        raise ValueError("Set KAGGLE_USERNAME in the notebook configuration cell.")
+    """Build a Kaggle CLI environment, or return {} when no token is available.
+
+    A first run does not need Kaggle credentials: Strata downloads the model
+    itself. Only the private cache upload at the end of the notebook needs a
+    token, so a missing Secret downgrades to "uploads disabled" instead of
+    killing the whole session.
+    """
     try:
         from kaggle_secrets import UserSecretsClient
         token = UserSecretsClient().get_secret(secret_name).strip()
-    except Exception as exc:
-        raise RuntimeError(
-            "Kaggle Secret " + secret_name + " was not available. Add it in Add-ons > Secrets, "
-            "enable notebook access, and rerun. Do not paste the token into notebook code."
-        ) from exc
+    except Exception:
+        token = ""
     if not token:
-        raise RuntimeError("Kaggle Secret " + secret_name + " is empty.")
+        print("Kaggle Secret " + secret_name + " not available: private cache uploads are "
+              "disabled. The model download and the server still work. Add the Secret in "
+              "Add-ons > Secrets and rerun if you want to save the caches.")
+        return {}
+    if not username or username.lower().startswith("your-"):
+        raise ValueError("Set KAGGLE_USERNAME in the notebook configuration cell.")
     # Keep credentials outside the saved notebook workspace and never print the token.
     home = Path("/tmp/devzonex-kaggle-home")
     config = home / ".kaggle"
@@ -955,6 +962,10 @@ def _clean_stage(stage: Path) -> None:
 
 def upload_model_cache(data_dir: Path, username: str, slug: str, family: str, variant: str,
                        env: dict[str, str], license_confirmed: bool, force: bool = False) -> bool:
+
+    if not env or not env.get("KAGGLE_CONFIG_DIR"):
+        print("Skipped: no Kaggle credentials in this session.")
+        return False
     if not license_confirmed:
         log("Skipped model upload. Confirm the model terms and enable the explicit license flag first.")
         return False
@@ -1012,6 +1023,10 @@ def upload_model_cache(data_dir: Path, username: str, slug: str, family: str, va
 
 
 def upload_runtime_cache(username: str, slug: str, env: dict[str, str], force: bool = False) -> bool:
+
+    if not env or not env.get("KAGGLE_CONFIG_DIR"):
+        print("Skipped: no Kaggle credentials in this session.")
+        return False
     if not (STRATA_ROOT / "terminal").exists() or not (STRATA_ROOT / "components").exists():
         log("Runtime upload skipped: terminal/components directory missing.")
         return False
