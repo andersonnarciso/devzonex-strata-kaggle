@@ -1063,7 +1063,8 @@ def opencode_config_snippet(public_url: str, model_id: str,
     """OpenCode 1.x provider block for the Strata tunnel.
 
     OpenCode 1.x reads "provider" with "npm" and "options"; the V2 shape
-    ("providers" with "package" and "settings") is rejected by 1.x.
+    ("providers" with "package" and "settings") is rejected by 1.x. The provider
+    object goes under the singular top-level "provider" key.
     """
     provider = {
         "name": "Strata (Kaggle)",
